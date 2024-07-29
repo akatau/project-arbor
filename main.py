@@ -1,8 +1,10 @@
 import openai
+from node import Node
 from langchain.llms import LLaMA
 from langchain import PromptTemplate, LLMChain, Agent
 from langchain.schema import BaseOutputParser
 from typing import List, Tuple, Any
+from critic import Critic
 
 openai.api_key = ''
 
@@ -10,6 +12,7 @@ class JSONOutputParser(BaseOutputParser):
     def parse(self, output: str) -> Any:
         import json
         return json.loads(output)
+
 
 code_and_doc_prompt = PromptTemplate(
     template="Generate Python code and documentation for the following task:\n\n{task}"
@@ -42,6 +45,16 @@ combine_code_chain = LLMChain(llm=llm, prompt=combine_code_prompt, output_parser
 review_code_chain = LLMChain(llm=llm, prompt=review_code_prompt, output_parser=JSONOutputParser())
 generate_tests_chain = LLMChain(llm=llm, prompt=generate_tests_prompt, output_parser=JSONOutputParser())
 test_code_chain = LLMChain(llm=llm, prompt=test_code_prompt, output_parser=JSONOutputParser())
+
+
+critic = Critic(
+    review_code_chain=review_code_chain,
+    generate_tests_chain=generate_tests_chain,
+    test_code_chain=test_code_chain
+)
+
+
+
 
 
 class ProjectAgent(Agent):
