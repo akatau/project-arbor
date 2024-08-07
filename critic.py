@@ -1,56 +1,68 @@
-from langchain import PromptTemplate, LLMChain, Agent
-from typing import List, Tuple
-import openai
+from typing import Any, List, Optional
+from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.callbacks import CallbackManagerForLLMRun
+from langchain_core.outputs import ChatGeneration, ChatResult
 
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage 
+from langchain_core.prompts.chat import HumanMessagePromptTemplate
+from langchain_core.prompt_values import PromptValue
+from langchain_core.tools import BaseTool
 
-class Critic:
-    def __init__(self, review_code_chain: LLMChain, generate_tests_chain: LLMChain, test_code_chain: LLMChain):
-        self.review_code_chain: LLMChain = review_code_chain
-        self.generate_tests_chain: LLMChain = generate_tests_chain
-        self.test_code_chain: LLMChain = test_code_chain
+from langchain_huggingface import HuggingFaceEndpoint, HuggingFacePipeline, ChatHuggingFace
 
-    def review_and_test_code(self, code: str, documentation: str) -> Tuple[str, str, str]:
-        while True:
-            review_response: str = self.review_code_chain.run(code=code, documentation=documentation)
-            code, documentation = self.apply_review_feedback(review_response)
-            
-            test_response: str = self.generate_tests_chain.run(code=code)
-            test_cases = test_response.strip()
+from problem import Problem
 
-            test_result: str = self.test_code_chain.run(code=code, test_cases=test_cases)
-            if "All tests passed" in test_result:
-                break
-            else:
-                print("Test failed, regenerating code based on feedback...")
-                code, documentation = self.apply_review_feedback(test_result)
+#TODO: Add the ability to receive feedback (reviews, debug messages, etc) from other models by
+#       writing a custom `invoke` function—or by creating another `Solution` type with reviews,
+#       and debug messages as attributes. 
+class Critic(BaseChatModel):    
+    """
+    `Critic` is a specialist BaseChatModel to analyze, review, and criticize the verbal solution of a given problem.
+    
+    It is intended to be used with 70b+ chat LLMs (for chain-of-thought to have effect).
+    """
+
+    def __init__(
+            self, 
+            model: BaseChatModel, 
+            system_message: SystemMessage, 
+            human_message_prompt_template: HumanMessagePromptTemplate, 
+            **kwargs: Any
+            ):
         
-        return code, documentation, test_cases
+        self.model: BaseChatModel = model
+        """`model` is the `BaseChatModel` that runs the inference."""
+        self.system_message: SystemMessage = system_message
+        """The system message to steer the model to the space of tokens appropriate for the problem domain."""
+        self.human_message_prompt_template = human_message_prompt_template
+        """The template for the final prompt."""
+        super().__init__(**kwargs)
 
-    def apply_review_feedback(self, response: str) -> Tuple[str, str]:
-        parts: List[str] = response.split("Documentation:")
-        code: str = parts[0].strip()
-        documentation: str = parts[1].strip() if len(parts) > 1 else ""
-        return code, documentation
+        
+    
+    def _generate(
+            self, 
+            messages: List[Problem],
+            stop: Optional[List[str]]=None,
+            run_manager: Optional[CallbackManagerForLLMRun]=None
+            ) -> ChatResult:
+        
+        #Currently, only the last BaseMessage is prompted.
+        problem: Problem = messages[-1]
 
-if __name__ == "__main__":
-    from main import review_code_chain, generate_tests_chain, test_code_chain
+        prompt: HumanMessage = HumanMessage(
+            content = self.human_message_prompt_template.format(problem = Problem.content).content
+            )
+        
+        messages: List[BaseMessage] = [prompt]
 
-    critic = Critic(
-        review_code_chain=review_code_chain,
-        generate_tests_chain=generate_tests_chain,
-        test_code_chain=test_code_chain
-    )
+        solution_ai_message: AIMessage = self.model.invoke(messages)
 
-    sample_code = """
-    def add(a, b):
-        return a + b
-    """
-    sample_doc = """
-    This function adds two numbers and returns the result.
-    """
+        generation = ChatGeneration(message=solution_ai_message)
+        return ChatResult(generations=[generation])
+        
+    @property
+    def _llm_type(self) -> str:
+        return "Critic: " + self.model._llm_type
 
-    reviewed_code, reviewed_doc, test_cases = critic.review_and_test_code(sample_code, sample_doc)
-
-    print("Reviewed Code:\n", reviewed_code)
-    print("\nReviewed Documentation:\n", reviewed_doc)
-    print("\nGenerated Test Cases:\n", test_cases)
+        
