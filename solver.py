@@ -6,6 +6,7 @@ from problem import Problem
 from generalist import Generalist
 from critic import Critic
 from coder import Coder
+from utils import str_to_python_func
 
 class Solver(RunnableSerializable):
     """
@@ -23,11 +24,6 @@ class Solver(RunnableSerializable):
             config: Optional[RunnableConfig] = None
             ) -> Problem:
 
-        """
-        1. Analyze the problem at hand and break it down to pieces :: RunnableSequence
-        """
-
-        
         problem_understading_generalist_template = PromptTemplate.from_template(
             """Analyze the following problem and break it down to pieces 
             while considering the possible edge cases:\nProblem: {problem_description}""")
@@ -71,31 +67,108 @@ class Solver(RunnableSerializable):
             """
         )
 
+        """
+        1. Analyze the problem at hand and break it down into pieces.
+        """
         
+        # Step 1: Analyze the problem with Generalist and Critic
+        problem_understanding_prompt = problem_understading_generalist_template.format(
+            problem_description=problem.description
+        )
+        problem_understanding = generalist.invoke([problem_understanding_prompt])
+        problem_verbose_description = problem_understanding.content
         
-        understand_problem = generalist | critic
+        feedback_prompt = problem_understanding_critic_template.format(
+            problem_description=problem.description,
+            problem_verbose_description=problem_verbose_description
+        )
+        feedback = critic.invoke([feedback_prompt])
+        feedback_text = feedback.content
+        
+        revised_analysis_prompt = problem_understanding_feedback_generalist_template.format(
+            problem_description=problem.description,
+            problem_verbose_description=problem_verbose_description,
+            critic_analysis_feedback=feedback_text
+        )
+        revised_analysis = generalist.invoke([revised_analysis_prompt])
+        problem.verbose_description = revised_analysis.content
+
+        # Generate subproblems
+        problem.subproblems = problem.generate_subproblems(generalist)
+        
+        # Process each subproblem recursively
+        for subproblem in problem.subproblems:
+            self.invoke(subproblem, generalist, critic, coder)
 
         """
+        2. Generate candidate verbal solutions.
+        """
 
-        2. Generate candidate verbal solutions :: RunnableSequence
+        for _ in range(problem.num_of_candidate_solutions):
+            candidate_solution_prompt = candidate_verbal_solution_generalist_template.format(
+                problem_verbose_description=problem.verbose_description
+            )
+            candidate_solution = generalist.invoke([candidate_solution_prompt])
+            problem.candidate_solutions.append(candidate_solution.content)
         
-        3. Analyze candidate verbal solutions via Critic :: RunnableSequence
-        
-        4. Feedback those critiques to the Generalist to generate other candidate 
-           verbal solutions accordingly :: RunnableSequence
-           NOTE: This may typically be repeated untill at least one verbal solution 
-           is accepted by the Critic :: RunnableSequence
-        
-        5. Pass the problem with the chosen verbal solution to the Generalist to give a list of
-           pure functions to generate with very verbose, descriptive names necessary to solve 
-           implement the chosen verbal solution: the sub problems.
-           Possibly also pass the output to Critic.
-           Make sure every block (like for-loops, while-loops, etc) or chunk is wrapped around a function.
 
-        6. Parse each subproblem, initialize new `Problem` objects with them, 
-           add the new `Problem` objects to the current `Problem` object.
+        """
+        3. Analyze candidate verbal solutions via Critic.
+        """
 
+        candidate_reviews = []
+        for solution in problem.candidate_solutions:
+            candidate_review_prompt = candidate_verbal_solution_critic_template.format(
+                problem_verbose_description=problem.verbose_description,
+                problem_verbal_solution=solution
+            )
+            review = critic.invoke([candidate_review_prompt])
+            candidate_reviews.append(review.content)
+        
+        # Select the best solution based on feedback
+        best_solution_index = candidate_reviews.index(max(candidate_reviews))
+        problem.chosen_solution = problem.solutions[best_solution_index]
+
+        """
+        4. Feedback those critiques to the Generalist.
+        """
+
+        feedback_prompt = candidate_verbal_solution_feedback_generalist_template.format(
+            problem_verbose_description=problem.verbose_description,
+            problem_verbal_solution=problem.chosen_solution,
+            problem_verbal_solution_feedback=candidate_reviews[best_solution_index]
+        )
+        revised_solution = generalist.invoke([feedback_prompt])
+        problem.chosen_solution = revised_solution.content
+
+        """
+        5. Generate subproblems for coding.
+        """
+
+        subproblems_prompt = "Generate a list of pure functions with verbose, descriptive names needed to implement the solution:\nSolution: " + problem.chosen_solution
+        subproblems = generalist.invoke([subproblems_prompt])
+        subproblem_functions = subproblems.content
+        
+        # Parse each function and generate new Problems
+        for func_code in subproblem_functions.split('\n'):
+            function = str_to_python_func(func_code)
+            if isinstance(function, Exception):
+                continue  # Handle exceptions if needed
+            subproblem_description = f"Implement the function: {function.__name__}"
+            subproblem = Problem(description=subproblem_description)
+            problem.subproblems.append(subproblem)
+
+        """
+        6. Parse each subproblem, initialize new `Problem` objects, 
+           and add them to the current `Problem` object.
+        """
+
+        # This is done in step 5 as each subproblem is initialized and added to `problem.subproblems`
+
+        """
         7. Repeat steps 1:6 for each subproblem until the leaves are reached.
         """
+        
+        return problem
 
         
